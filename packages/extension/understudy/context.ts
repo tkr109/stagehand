@@ -566,20 +566,23 @@ export class BrowserContext {
    * Close CDP and clear all mappings. Best-effort cleanup.
    */
   async close(): Promise<void> {
-    await this.conn.close();
-    this.pagesByTarget.clear();
-    this.mainFrameToTarget.clear();
-    this.sessionOwnerPage.clear();
-    this.frameOwnerPage.clear();
-    this.pendingOopifByMainFrame.clear();
-    this.createdAtByTarget.clear();
-    this.typeByTarget.clear();
-    this.pendingCreatedTargetUrl.clear();
-    this.pageCreationFailures.clear();
-    this.pendingInitialTopLevelTargets.clear();
-    this.pendingNewPageTargets.clear();
-    this.domainPolicyClosingTargets.clear();
-    this.domainPolicyClosePromises.clear();
+    try {
+      await this.conn.close();
+    } finally {
+      this.pagesByTarget.clear();
+      this.mainFrameToTarget.clear();
+      this.sessionOwnerPage.clear();
+      this.frameOwnerPage.clear();
+      this.pendingOopifByMainFrame.clear();
+      this.createdAtByTarget.clear();
+      this.typeByTarget.clear();
+      this.pendingCreatedTargetUrl.clear();
+      this.pageCreationFailures.clear();
+      this.pendingInitialTopLevelTargets.clear();
+      this.pendingNewPageTargets.clear();
+      this.domainPolicyClosingTargets.clear();
+      this.domainPolicyClosePromises.clear();
+    }
   }
 
   /**
@@ -1086,24 +1089,28 @@ export class BrowserContext {
     const page = this.pagesByTarget.get(targetId);
     if (!page) return;
 
-    page.dispose();
-    const mainId = page.mainFrameId();
-    this.mainFrameToTarget.delete(mainId);
-    this.frameOwnerPage.delete(mainId);
+    try {
+      page.dispose();
+    } finally {
+      for (const [fid] of this.pendingOopifByMainFrame) {
+        const owner = this.frameOwnerPage.get(fid);
+        if (!owner || owner === page) this.pendingOopifByMainFrame.delete(fid);
+      }
+      for (const [fid, owner] of this.frameOwnerPage) {
+        if (owner === page) this.frameOwnerPage.delete(fid);
+      }
+      for (const [fid, ownerTargetId] of this.mainFrameToTarget) {
+        if (ownerTargetId === targetId) this.mainFrameToTarget.delete(fid);
+      }
+      for (const [sid, owner] of this.sessionOwnerPage) {
+        if (owner === page) this.sessionOwnerPage.delete(sid);
+      }
 
-    for (const [sid, p] of Array.from(this.sessionOwnerPage.entries())) {
-      if (p === page) this.sessionOwnerPage.delete(sid);
+      this.pagesByTarget.delete(targetId);
+      this.createdAtByTarget.delete(targetId);
+      this.typeByTarget.delete(targetId);
+      this.pendingCreatedTargetUrl.delete(targetId);
     }
-
-    for (const [fid] of Array.from(this.pendingOopifByMainFrame.entries())) {
-      const owner = this.frameOwnerPage.get(fid);
-      if (!owner || owner === page) this.pendingOopifByMainFrame.delete(fid);
-    }
-
-    this.pagesByTarget.delete(targetId);
-    this.createdAtByTarget.delete(targetId);
-    this.typeByTarget.delete(targetId);
-    this.pendingCreatedTargetUrl.delete(targetId);
   }
 
   private recordPageCreationFailure(
@@ -1168,9 +1175,19 @@ export class BrowserContext {
     });
 
     session.on<Protocol.Page.FrameDetachedEvent>("Page.frameDetached", (evt) => {
-      owner.onFrameDetached(evt.frameId, evt.reason ?? "remove");
+      const detachedFrames = new Set<string>();
       if (evt.reason !== "swap") {
-        this.frameOwnerPage.delete(evt.frameId);
+        const collect = (frameId: string): void => {
+          if (detachedFrames.has(frameId)) return;
+          detachedFrames.add(frameId);
+          for (const child of owner.registry.frames.get(frameId)?.children ?? []) collect(child);
+        };
+        collect(evt.frameId);
+      }
+      owner.onFrameDetached(evt.frameId, evt.reason ?? "remove");
+      for (const frameId of detachedFrames) {
+        if (this.frameOwnerPage.get(frameId) === owner) this.frameOwnerPage.delete(frameId);
+        this.pendingOopifByMainFrame.delete(frameId);
       }
     });
 

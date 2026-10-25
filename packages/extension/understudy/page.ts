@@ -398,8 +398,16 @@ export class Page {
   public onFrameDetached(frameId: string, reason: string = "remove"): void {
     // A late process-swap detach must not remove tools reported by the new owner.
     if (reason !== "swap") this.invalidateWebMCPFrame(frameId);
+    const detachedFrames = new Set<string>();
+    const collect = (id: string): void => {
+      if (detachedFrames.has(id)) return;
+      detachedFrames.add(id);
+      for (const child of this.registry.frames.get(id)?.children ?? []) collect(child);
+    };
+    if (reason === "swap") detachedFrames.add(frameId);
+    else collect(frameId);
     this.registry.onFrameDetached(frameId, reason);
-    this.frameCache.delete(frameId);
+    for (const id of detachedFrames) this.frameCache.delete(id);
   }
 
   /**
